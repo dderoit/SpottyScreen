@@ -35,107 +35,116 @@ namespace SpottyScreen
         private async void AuthenticateSpotify()
         {
             const string redirectUri = "http://127.0.0.1:5000/callback";
-            const string clientId = "41033dc65baf42e287b21398aafb4501"; // Replace with yours
+            const string clientId = "41033dc65baf42e287b21398aafb4501"; // Replace with your client ID
 
-            string savedToken = Properties.Settings.Default.SpotifyAccessToken;
+            string savedAccessToken = Properties.Settings.Default.SpotifyAccessToken;
             string savedRefreshToken = Properties.Settings.Default.SpotifyRefreshToken;
 
-            if (!string.IsNullOrEmpty(savedToken) && !string.IsNullOrEmpty(savedRefreshToken))
-            {
-                spotify = new SpotifyClient(savedToken);
+            var oauth = new OAuthClient();
 
-                // Test if the token works; if not, refresh it
+            if (!string.IsNullOrEmpty(savedAccessToken) && !string.IsNullOrEmpty(savedRefreshToken))
+            {
+                spotify = new SpotifyClient(savedAccessToken);
+
                 try
                 {
-                    await spotify.Player.GetCurrentPlayback();
+                    await spotify.Player.GetCurrentPlayback(); // Test if token works
                     StartPolling();
+                    return;
                 }
                 catch (APIUnauthorizedException)
                 {
-                    await RefreshAccessToken(clientId, savedRefreshToken, redirectUri);
-                    StartPolling();
+                    // Access token expired – try refreshing
+                    var success = await RefreshAccessToken(clientId, savedRefreshToken, oauth);
+                    if (success)
+                    {
+                        StartPolling();
+                        return;
+                    }
+
+                    // If refresh failed, fall through to re-auth
                 }
             }
-            else
+
+            // Begin authentication flow with PKCE
+            var (verifier, challenge) = PKCEUtil.GenerateCodes();
+
+            var loginRequest = new LoginRequest(
+                new Uri(redirectUri),
+                clientId,
+                LoginRequest.ResponseType.Code
+            )
             {
-                // Generate code verifier and challenge
-                var (verifier, challenge) = PKCEUtil.GenerateCodes();
+                CodeChallengeMethod = "S256",
+                CodeChallenge = challenge,
+                Scope = new[] {
+            Scopes.UserReadPlaybackState,
+            Scopes.UserReadCurrentlyPlaying
+        }
+            };
 
-                // Set up the login request
-                var loginRequest = new LoginRequest(
-                    new Uri(redirectUri),
-                    clientId,
-                    LoginRequest.ResponseType.Code
-                )
-                {
-                    CodeChallengeMethod = "S256",
-                    CodeChallenge = challenge,
-                    Scope = new[] {
-                Scopes.UserReadPlaybackState,
-                Scopes.UserReadCurrentlyPlaying
-            }
-                };
-
-                // Start a mini web server to listen for Spotify redirect
-                var http = new HttpListener();
+            using (var http = new HttpListener())
+            {
                 http.Prefixes.Add("http://127.0.0.1:5000/callback/");
                 http.Start();
 
-                // Open Spotify login in browser
+
                 Process.Start(new ProcessStartInfo
                 {
                     FileName = loginRequest.ToUri().ToString(),
                     UseShellExecute = true
                 });
 
-                // Wait for callback
                 var context = await http.GetContextAsync();
                 var code = context.Request.QueryString["code"];
 
-                // Respond to browser
-                string responseString = "<html><body><h1>Login successful!</h1><p>You can now close this window.</p></body></html>";
-                byte[] buffer = Encoding.UTF8.GetBytes(responseString);
+                string responseHtml = "<html><body><h1>Login successful!</h1><p>You can close this window.</p></body></html>";
+                byte[] buffer = Encoding.UTF8.GetBytes(responseHtml);
                 context.Response.ContentLength64 = buffer.Length;
                 await context.Response.OutputStream.WriteAsync(buffer, 0, buffer.Length);
                 context.Response.OutputStream.Close();
                 http.Stop();
 
-                // Exchange code for access token
                 var tokenRequest = new PKCETokenRequest(clientId, code, new Uri(redirectUri), verifier);
-                var oauth = new OAuthClient();
                 var tokenResponse = await oauth.RequestToken(tokenRequest);
 
-                // Save the access and refresh tokens
                 Properties.Settings.Default.SpotifyAccessToken = tokenResponse.AccessToken;
                 Properties.Settings.Default.SpotifyRefreshToken = tokenResponse.RefreshToken;
                 Properties.Settings.Default.Save();
 
-                // Initialize Spotify client
                 spotify = new SpotifyClient(tokenResponse.AccessToken);
                 StartPolling();
             }
         }
 
-        private async Task RefreshAccessToken(string clientId, string refreshToken, string redirectUri)
+        private async Task<bool> RefreshAccessToken(string clientId, string refreshToken, OAuthClient oauth)
         {
-            var refreshRequest = new PKCETokenRefreshRequest(clientId, refreshToken);
-            var oauth = new OAuthClient();
-
             try
             {
+                var refreshRequest = new PKCETokenRefreshRequest(clientId, refreshToken);
                 var tokenResponse = await oauth.RequestToken(refreshRequest);
 
-                // Save the new access token
+                // Save new access token
                 Properties.Settings.Default.SpotifyAccessToken = tokenResponse.AccessToken;
+
+                // Save new refresh token if provided
+                if (!string.IsNullOrEmpty(tokenResponse.RefreshToken))
+                {
+                    Properties.Settings.Default.SpotifyRefreshToken = tokenResponse.RefreshToken;
+                }
+
                 Properties.Settings.Default.Save();
 
-                // Update the Spotify client
                 spotify = new SpotifyClient(tokenResponse.AccessToken);
+                return true;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Failed to refresh token: {ex.Message}");
-                MessageBox.Show("Failed to refresh Spotify token. Please re-authenticate.", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                Console.WriteLine($"Token refresh failed: {ex.Message}");
+                MessageBox.Show("Spotify session expired. Please log in again.", "Authentication Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                Properties.Settings.Default.SpotifyRefreshToken = null;
+                Properties.Settings.Default.Save();
+                return false;
             }
         }
 
@@ -172,7 +181,7 @@ namespace SpottyScreen
                 catch (APIUnauthorizedException)
                 {
                     Console.WriteLine("Access token expired, refreshing...");
-                    await RefreshAccessToken("41033dc65baf42e287b21398aafb4501", Properties.Settings.Default.SpotifyRefreshToken, "http://127.0.0.1:5000/callback");
+                    await RefreshAccessToken("41033dc65baf42e287b21398aafb4501", Properties.Settings.Default.SpotifyRefreshToken, new OAuthClient());
                 }
                 catch (Exception ex)
                 {
@@ -435,46 +444,56 @@ namespace SpottyScreen
 
         private void ScrollToCurrentLyric(int currentIndex)
         {
-            var scrollViewer = LyricsScrollViewer;
-
-            if (scrollViewer == null || currentIndex < 0 || currentIndex >= LyricsPanel.Children.Count)
-            {
-                Console.WriteLine("Invalid scroll target!");
+            if (LyricsScrollViewer == null || currentIndex < 0 || currentIndex >= LyricsPanel.Children.Count)
                 return;
-            }
 
             var currentLyric = LyricsPanel.Children[currentIndex] as TextBlock;
-            if (currentLyric == null)
+            if (currentLyric == null || !currentLyric.IsLoaded)
                 return;
 
-            // Delay execution until layout is updated
-            Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() =>
+            // Make sure layout is ready before measuring
+            currentLyric.Dispatcher.InvokeAsync(() =>
             {
-                double lyricHeight = currentLyric.ActualHeight;
-                double targetOffset = currentIndex * lyricHeight - (scrollViewer.ViewportHeight / 2);
-
-                targetOffset = Math.Max(0, targetOffset); // prevent negative offset
-
-                // Cancel previous scroll
-                CompositionTarget.Rendering -= SmoothScrollHandler;
-
-                double currentOffset = scrollViewer.VerticalOffset;
-
-                SmoothScrollHandler = (s, e) =>
+                try
                 {
-                    currentOffset += (targetOffset - currentOffset) * 0.2;
-                    scrollViewer.ScrollToVerticalOffset(currentOffset);
+                    // Get current offset
+                    double currentOffset = LyricsScrollViewer.VerticalOffset;
 
-                    if (Math.Abs(targetOffset - currentOffset) < 1)
+                    // Transform lyric position relative to the ScrollViewer
+                    GeneralTransform transform = currentLyric.TransformToAncestor(LyricsScrollViewer);
+                    Point position = transform.Transform(new Point(0, 0));
+
+                    // Calculate centered target offset
+                    double targetOffset = currentOffset + position.Y - (LyricsScrollViewer.ViewportHeight / 2) + (currentLyric.ActualHeight / 2);
+
+                    // Clamp the value to avoid negative scrolls
+                    targetOffset = Math.Max(0, targetOffset);
+
+                    // Remove any existing handler
+                    CompositionTarget.Rendering -= SmoothScrollHandler;
+
+                    // Animate toward the target offset
+                    SmoothScrollHandler = (s, e) =>
                     {
-                        scrollViewer.ScrollToVerticalOffset(targetOffset);
-                        CompositionTarget.Rendering -= SmoothScrollHandler;
-                    }
-                };
+                        currentOffset += (targetOffset - currentOffset) * 0.2;
+                        LyricsScrollViewer.ScrollToVerticalOffset(currentOffset);
 
-                CompositionTarget.Rendering += SmoothScrollHandler;
-            }));
+                        if (Math.Abs(targetOffset - currentOffset) < 1)
+                        {
+                            LyricsScrollViewer.ScrollToVerticalOffset(targetOffset);
+                            CompositionTarget.Rendering -= SmoothScrollHandler;
+                        }
+                    };
+
+                    CompositionTarget.Rendering += SmoothScrollHandler;
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine("Scroll error: " + ex.Message);
+                }
+            }, DispatcherPriority.Background);
         }
+
 
         // Event handler reference for smooth scrolling
         private EventHandler SmoothScrollHandler;

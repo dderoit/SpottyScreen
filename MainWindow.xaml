@@ -21,15 +21,31 @@
             <Border Width="400" Height="400" CornerRadius="20" Margin="20">
                 <Image x:Name="AlbumCover" Stretch="UniformToFill"/>
             </Border>
-            <StackPanel Grid.Column="1" Margin="40">
-                <TextBlock x:Name="TrackName" FontSize="48" Foreground="White" FontFamily="Segoe UI Variable" FontWeight="Bold"/>
-                <TextBlock x:Name="ArtistName" FontSize="28" Foreground="#DDDDDD" FontFamily="Segoe UI Variable"/>
-                <TextBlock x:Name="AlbumName" FontSize="24" Foreground="#AAAAAA" FontFamily="Segoe UI Variable" Margin="0,0,0,40"/>
+            <!-- Right-side layout with vertical structure -->
+            <Grid Grid.Column="1" Margin="40">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <!-- Track name -->
+                    <RowDefinition Height="Auto"/>
+                    <!-- Artist name -->
+                    <RowDefinition Height="Auto"/>
+                    <!-- Album name -->
+                    <RowDefinition Height="*"/>
+                    <!-- Lyrics scroll area -->
+                </Grid.RowDefinitions>
 
-                <ScrollViewer x:Name="LyricsScrollViewer" VerticalScrollBarVisibility="Hidden" HorizontalScrollBarVisibility="Hidden" IsHitTestVisible="False" Height="300">
+                <TextBlock x:Name="TrackName" Grid.Row="0" FontSize="48" Foreground="White" FontFamily="Segoe UI Variable" FontWeight="Bold"/>
+                <TextBlock x:Name="ArtistName" Grid.Row="1" FontSize="28" Foreground="#DDDDDD" FontFamily="Segoe UI Variable"/>
+                <TextBlock x:Name="AlbumName" Grid.Row="2" FontSize="24" Foreground="#AAAAAA" FontFamily="Segoe UI Variable" Margin="0,0,0,40"/>
+
+                <!-- Now it stretches properly and scrolls! -->
+                <ScrollViewer Grid.Row="3" x:Name="LyricsScrollViewer"
+                              VerticalScrollBarVisibility="Hidden"
+                              HorizontalScrollBarVisibility="Hidden"
+                              IsHitTestVisible="False">
                     <StackPanel x:Name="LyricsPanel"/>
                 </ScrollViewer>
-            </StackPanel>
+            </Grid>
         </Grid>
     </Grid>
 </Window>
