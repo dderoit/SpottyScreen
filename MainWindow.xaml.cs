@@ -147,19 +147,27 @@ namespace SpottyScreen
             {
                 try
                 {
+                    // Get current playback info
                     var playback = await spotify.Player.GetCurrentPlayback();
                     if (playback?.Item is FullTrack track && track.Id != currentTrack?.Id)
                     {
                         currentTrack = track;
+
+                        // Reset the UI and scroll logic for the new song
+                        ResetLyricsUI();
                         UpdateUI(track);
                         await LoadLyricsAsync(track);
                     }
 
+                    // Get the current playback position
                     var playbackProgress = playback?.ProgressMs ?? 0;
                     var playbackTime = TimeSpan.FromMilliseconds(playbackProgress);
 
+                    // Sync lyrics with playback time
                     SyncLyricsWithPlayback(playbackTime);
-                    await Task.Delay(500);
+
+                    // Shorter delay for smoother updates
+                    await Task.Delay(100); // Reduced to 100ms for better sync
                 }
                 catch (APIUnauthorizedException)
                 {
@@ -173,6 +181,19 @@ namespace SpottyScreen
             }
         }
 
+        private void ResetLyricsUI()
+        {
+            // Stop any ongoing scrolling logic
+            CompositionTarget.Rendering -= SmoothScrollHandler;
+
+            // Clear lyrics and reset scroll state
+            LyricsPanel.Children.Clear();
+            LyricsScrollViewer.ScrollToVerticalOffset(0);
+
+            // Reset the current lyric index
+            currentLyricIndex = -1;
+        }
+
         private void SyncLyricsWithPlayback(TimeSpan playbackTime)
         {
             // Find the closest lyric to the current playback time
@@ -182,9 +203,57 @@ namespace SpottyScreen
             {
                 currentLyricIndex = idx;
 
-                // Update the UI to display the current lyric
-                UpdateLyricsDisplay();
+                // Update UI to highlight the current lyric
+                Application.Current.Dispatcher.Invoke(() =>
+                {
+                    UpdateLyricsDisplay(idx);
+                });
             }
+        }
+
+        private void UpdateLyricsDisplay(int currentIndex)
+        {
+            // Clear existing children only if necessary
+            if (LyricsPanel.Children.Count != lyrics.Count)
+            {
+                LyricsPanel.Children.Clear();
+
+                foreach (var lyric in lyrics)
+                {
+                    var tb = new TextBlock
+                    {
+                        Text = lyric.Text,
+                        Foreground = Brushes.Gray, // Default color
+                        FontSize = 24,
+                        Opacity = 0.5,
+                        FontFamily = new FontFamily("Segoe UI Variable"),
+                        Margin = new Thickness(0, 4, 0, 4)
+                    };
+
+                    LyricsPanel.Children.Add(tb);
+                }
+            }
+
+            // Update the highlighting
+            for (int i = 0; i < LyricsPanel.Children.Count; i++)
+            {
+                var tb = (TextBlock)LyricsPanel.Children[i];
+                if (i == currentIndex)
+                {
+                    tb.Foreground = Brushes.White; // Highlight current lyric
+                    tb.FontSize = 32;
+                    tb.Opacity = 1;
+                }
+                else
+                {
+                    tb.Foreground = Brushes.Gray;
+                    tb.FontSize = 24;
+                    tb.Opacity = 0.5;
+                }
+            }
+
+            // Smoothly scroll to the current lyric
+            ScrollToCurrentLyric(currentIndex);
         }
 
         private async void UpdateUI(FullTrack track)
@@ -358,12 +427,12 @@ namespace SpottyScreen
                         LyricsPanel.Children.Add(tb);
                     }
 
-                    ScrollToCurrentLyric();
+                    ScrollToCurrentLyric(idx);
                 });
             }
         }
 
-        private void ScrollToCurrentLyric()
+        private void ScrollToCurrentLyric(int currentIndex)
         {
             var scrollViewer = LyricsScrollViewer;
 
@@ -373,23 +442,44 @@ namespace SpottyScreen
                 return;
             }
 
-            var currentLyric = LyricsPanel.Children.OfType<TextBlock>()
-                .FirstOrDefault(tb => tb.Foreground == Brushes.White);
+            // Get the current lyric's TextBlock
+            var currentLyric = LyricsPanel.Children[currentIndex] as TextBlock;
 
             if (currentLyric != null)
             {
-                // Ensure that the TextBlock is fully rendered before attempting to scroll
-                currentLyric.Loaded += (s, e) =>
-                {
-                    var lyricIndex = LyricsPanel.Children.IndexOf(currentLyric);
-                    var lyricHeight = currentLyric.ActualHeight;
+                // Calculate the desired offset
+                var lyricHeight = currentLyric.ActualHeight;
+                var targetOffset = currentIndex * lyricHeight - (scrollViewer.ActualHeight / 2);
 
-                    // Adjust scroll position to center the current lyric
-                    var offset = lyricIndex * lyricHeight - (scrollViewer.ActualHeight / 2);
-                    scrollViewer.ScrollToVerticalOffset(offset);
+                // Smoothly scroll using CompositionTarget.Rendering
+                double currentOffset = scrollViewer.VerticalOffset;
+
+                // Ensure no multiple handlers are attached
+                CompositionTarget.Rendering -= SmoothScrollHandler;
+
+                // Attach a new handler for smooth scrolling
+                SmoothScrollHandler = (s, e) =>
+                {
+                    // Gradually move toward the target offset
+                    currentOffset += (targetOffset - currentOffset) * 0.2;
+
+                    // Scroll to the new offset
+                    scrollViewer.ScrollToVerticalOffset(currentOffset);
+
+                    // Stop scrolling when close enough to the target
+                    if (Math.Abs(targetOffset - currentOffset) < 1)
+                    {
+                        scrollViewer.ScrollToVerticalOffset(targetOffset);
+                        CompositionTarget.Rendering -= SmoothScrollHandler;
+                    }
                 };
+
+                CompositionTarget.Rendering += SmoothScrollHandler;
             }
         }
+
+        // Event handler reference for smooth scrolling
+        private EventHandler SmoothScrollHandler;
 
         private void StartLyricSync()
         {
