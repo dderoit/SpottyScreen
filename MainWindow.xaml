@@ -1,0 +1,34 @@
+﻿<Window x:Class="SpottyScreen.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        WindowStyle="None" WindowState="Maximized"
+        Background="Black" AllowsTransparency="True">
+    <Grid x:Name="RootGrid">
+        <Image x:Name="BlurredBackground" Stretch="UniformToFill" Opacity="0.3"/>
+        <Rectangle>
+            <Rectangle.Fill>
+                <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                    <GradientStop Color="#AA000000" Offset="0"/>
+                    <GradientStop Color="#CC000000" Offset="1"/>
+                </LinearGradientBrush>
+            </Rectangle.Fill>
+        </Rectangle>
+        <Grid Margin="100">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <Border Width="400" Height="400" CornerRadius="20" Margin="20">
+                <Image x:Name="AlbumCover" Stretch="UniformToFill"/>
+            </Border>
+            <StackPanel Grid.Column="1" Margin="40">
+                <TextBlock x:Name="TrackName" FontSize="48" Foreground="White" FontFamily="Segoe UI Variable" FontWeight="Bold"/>
+                <TextBlock x:Name="ArtistName" FontSize="28" Foreground="#DDDDDD" FontFamily="Segoe UI Variable"/>
+                <TextBlock x:Name="AlbumName" FontSize="24" Foreground="#AAAAAA" FontFamily="Segoe UI Variable" Margin="0,0,0,40"/>
+                <ScrollViewer VerticalScrollBarVisibility="Hidden" Height="300">
+                    <StackPanel x:Name="LyricsPanel"/>
+                </ScrollViewer>
+            </StackPanel>
+        </Grid>
+    </Grid>
+</Window>
