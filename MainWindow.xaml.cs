@@ -16,6 +16,7 @@ using System.Windows.Threading;
 using System.Diagnostics;
 using System.Text;
 using System.Net;
+using System.Windows.Shapes;
 
 namespace SpottyScreen
 {
@@ -232,12 +233,12 @@ namespace SpottyScreen
                     var tb = new TextBlock
                     {
                         Text = lyric.Text,
-                        Foreground = Brushes.Gray, // Default color
-                        FontSize = 24,
-                        Opacity = 0.5,
+                        FontSize = 32,
+                        Foreground = Brushes.White,
                         FontFamily = new FontFamily("Segoe UI Variable"),
-                        Margin = new Thickness(0, 4, 0, 4),
-                        TextWrapping = TextWrapping.Wrap
+                        TextWrapping = TextWrapping.Wrap,
+                        TextAlignment = TextAlignment.Center,
+                        TextTrimming = TextTrimming.None
                     };
 
                     LyricsPanel.Children.Add(tb);
@@ -248,16 +249,17 @@ namespace SpottyScreen
             for (int i = 0; i < LyricsPanel.Children.Count; i++)
             {
                 var tb = (TextBlock)LyricsPanel.Children[i];
+
                 if (i == currentIndex)
                 {
                     tb.Foreground = Brushes.White; // Highlight current lyric
-                    tb.FontSize = 32;
+                    tb.FontSize = 52;
                     tb.Opacity = 1;
                 }
                 else
                 {
                     tb.Foreground = Brushes.Gray;
-                    tb.FontSize = 24;
+                    tb.FontSize = 40;
                     tb.Opacity = 0.5;
                 }
             }
@@ -386,6 +388,11 @@ namespace SpottyScreen
             // Debug log: Ensure lyrics are loaded correctly
             Console.WriteLine($"Loaded {lyrics.Count} lyric lines.");
 
+            Application.Current.Dispatcher.Invoke(() =>
+            {
+                UpdateLyricsDisplay(-1); // Force initial render of all lyrics in gray
+            });
+
             StartLyricSync();
         }
 
@@ -396,10 +403,12 @@ namespace SpottyScreen
             {
                 Text = "No lyrics found",
                 Foreground = Brushes.White,
-                FontSize = 24,
+                FontSize = 40,
                 FontFamily = new FontFamily("Segoe UI Variable"),
                 HorizontalAlignment = HorizontalAlignment.Center,
                 VerticalAlignment = VerticalAlignment.Center,
+                TextWrapping = TextWrapping.Wrap,
+                MaxWidth = 600,
                 Margin = new Thickness(20)
             };
 
@@ -428,10 +437,14 @@ namespace SpottyScreen
                         {
                             Text = lyrics[i].Text,
                             Foreground = i == idx ? Brushes.White : Brushes.Gray, // Highlight current lyric
-                            FontSize = i == idx ? 32 : 24,
+                            FontSize = i == idx ? 52 : 40,
                             Opacity = i == idx ? 1 : 0.5,
                             FontFamily = new FontFamily("Segoe UI Variable"),
-                            Margin = new Thickness(0, 4, 0, 4)
+                            Margin = new Thickness(0, 4, 0, 4),
+                            TextWrapping = TextWrapping.Wrap,
+                            HorizontalAlignment = HorizontalAlignment.Center, // Center text horizontally
+                            TextAlignment = TextAlignment.Center,
+                            VerticalAlignment = VerticalAlignment.Center
                         };
 
                         LyricsPanel.Children.Add(tb);
