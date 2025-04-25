@@ -227,7 +227,8 @@ namespace SpottyScreen
                         FontSize = 24,
                         Opacity = 0.5,
                         FontFamily = new FontFamily("Segoe UI Variable"),
-                        Margin = new Thickness(0, 4, 0, 4)
+                        Margin = new Thickness(0, 4, 0, 4),
+                        TextWrapping = TextWrapping.Wrap
                     };
 
                     LyricsPanel.Children.Add(tb);
@@ -436,37 +437,34 @@ namespace SpottyScreen
         {
             var scrollViewer = LyricsScrollViewer;
 
-            if (scrollViewer == null)
+            if (scrollViewer == null || currentIndex < 0 || currentIndex >= LyricsPanel.Children.Count)
             {
-                Console.WriteLine("ScrollViewer not found!");
+                Console.WriteLine("Invalid scroll target!");
                 return;
             }
 
-            // Get the current lyric's TextBlock
             var currentLyric = LyricsPanel.Children[currentIndex] as TextBlock;
+            if (currentLyric == null)
+                return;
 
-            if (currentLyric != null)
+            // Delay execution until layout is updated
+            Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() =>
             {
-                // Calculate the desired offset
-                var lyricHeight = currentLyric.ActualHeight;
-                var targetOffset = currentIndex * lyricHeight - (scrollViewer.ActualHeight / 2);
+                double lyricHeight = currentLyric.ActualHeight;
+                double targetOffset = currentIndex * lyricHeight - (scrollViewer.ViewportHeight / 2);
 
-                // Smoothly scroll using CompositionTarget.Rendering
-                double currentOffset = scrollViewer.VerticalOffset;
+                targetOffset = Math.Max(0, targetOffset); // prevent negative offset
 
-                // Ensure no multiple handlers are attached
+                // Cancel previous scroll
                 CompositionTarget.Rendering -= SmoothScrollHandler;
 
-                // Attach a new handler for smooth scrolling
+                double currentOffset = scrollViewer.VerticalOffset;
+
                 SmoothScrollHandler = (s, e) =>
                 {
-                    // Gradually move toward the target offset
                     currentOffset += (targetOffset - currentOffset) * 0.2;
-
-                    // Scroll to the new offset
                     scrollViewer.ScrollToVerticalOffset(currentOffset);
 
-                    // Stop scrolling when close enough to the target
                     if (Math.Abs(targetOffset - currentOffset) < 1)
                     {
                         scrollViewer.ScrollToVerticalOffset(targetOffset);
@@ -475,7 +473,7 @@ namespace SpottyScreen
                 };
 
                 CompositionTarget.Rendering += SmoothScrollHandler;
-            }
+            }));
         }
 
         // Event handler reference for smooth scrolling
