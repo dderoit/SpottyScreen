@@ -17,6 +17,7 @@ using System.Diagnostics;
 using System.Text;
 using System.Net;
 using System.Windows.Shapes;
+using System.Text.RegularExpressions; // Added for Regex
 
 namespace SpottyScreen
 {
@@ -25,11 +26,13 @@ namespace SpottyScreen
         private SpotifyClient spotify;
         private List<LyricLine> lyrics = new List<LyricLine>();
         private int currentLyricIndex = -1;
-        private DispatcherTimer lyricTimer = new DispatcherTimer();
+        // private DispatcherTimer lyricTimer = new DispatcherTimer(); // Removed redundant timer
 
         public MainWindow()
         {
             InitializeComponent();
+            // Ensure the ScrollViewer width is available for MaxWidth calculation
+            LyricsScrollViewer.Loaded += (s, e) => { /* Can trigger initial UI update if needed */ };
             AuthenticateSpotify();
         }
 
@@ -55,80 +58,118 @@ namespace SpottyScreen
                 }
                 catch (APIUnauthorizedException)
                 {
-                    // Access token expired – try refreshing
                     var success = await RefreshAccessToken(clientId, savedRefreshToken, oauth);
                     if (success)
                     {
                         StartPolling();
                         return;
                     }
-
-                    // If refresh failed, fall through to re-auth
+                }
+                catch (Exception ex) // Catch other potential exceptions during initial check
+                {
+                    Console.WriteLine($"Error initializing Spotify client: {ex.Message}");
+                    // Decide how to handle this - maybe attempt full auth flow
                 }
             }
 
-            // Begin authentication flow with PKCE
-            var (verifier, challenge) = PKCEUtil.GenerateCodes();
-
-            var loginRequest = new LoginRequest(
-                new Uri(redirectUri),
-                clientId,
-                LoginRequest.ResponseType.Code
-            )
-            {
-                CodeChallengeMethod = "S256",
-                CodeChallenge = challenge,
-                Scope = new[] {
-            Scopes.UserReadPlaybackState,
-            Scopes.UserReadCurrentlyPlaying
+            // If token invalid, expired, or refresh failed, start full auth
+            await StartAuthorizationCodeFlow(clientId, redirectUri, oauth);
         }
-            };
 
-            using (var http = new HttpListener())
+        // Extracted auth flow logic for clarity
+        private async Task StartAuthorizationCodeFlow(string clientId, string redirectUri, OAuthClient oauth)
+        {
+            try
             {
-                http.Prefixes.Add("http://127.0.0.1:5000/callback/");
-                http.Start();
+                var (verifier, challenge) = PKCEUtil.GenerateCodes();
 
-
-                Process.Start(new ProcessStartInfo
+                var loginRequest = new LoginRequest(
+                    new Uri(redirectUri),
+                    clientId,
+                    LoginRequest.ResponseType.Code
+                )
                 {
-                    FileName = loginRequest.ToUri().ToString(),
-                    UseShellExecute = true
-                });
+                    CodeChallengeMethod = "S256",
+                    CodeChallenge = challenge,
+                    Scope = new[] { Scopes.UserReadPlaybackState, Scopes.UserReadCurrentlyPlaying }
+                };
 
-                var context = await http.GetContextAsync();
-                var code = context.Request.QueryString["code"];
+                using (var http = new HttpListener())
+                {
+                    http.Prefixes.Add("http://127.0.0.1:5000/callback/"); // Ensure trailing slash
+                    http.Start();
 
-                string responseHtml = "<html><body><h1>Login successful!</h1><p>You can close this window.</p></body></html>";
-                byte[] buffer = Encoding.UTF8.GetBytes(responseHtml);
-                context.Response.ContentLength64 = buffer.Length;
-                await context.Response.OutputStream.WriteAsync(buffer, 0, buffer.Length);
-                context.Response.OutputStream.Close();
-                http.Stop();
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = loginRequest.ToUri().ToString(),
+                        UseShellExecute = true
+                    });
 
-                var tokenRequest = new PKCETokenRequest(clientId, code, new Uri(redirectUri), verifier);
-                var tokenResponse = await oauth.RequestToken(tokenRequest);
+                    var context = await http.GetContextAsync();
+                    var code = context.Request.QueryString["code"];
 
-                Properties.Settings.Default.SpotifyAccessToken = tokenResponse.AccessToken;
-                Properties.Settings.Default.SpotifyRefreshToken = tokenResponse.RefreshToken;
+                    // Send response to browser before proceeding
+                    string responseHtml = "<html><head><style>body { font-family: sans-serif; background-color: #f0f0f0; text-align: center; padding-top: 50px; }</style></head><body><h1>Authentication Successful!</h1><p>You can now close this window and return to SpottyScreen.</p><script>window.close();</script></body></html>";
+                    byte[] buffer = Encoding.UTF8.GetBytes(responseHtml);
+                    context.Response.ContentType = "text/html";
+                    context.Response.ContentLength64 = buffer.Length;
+                    await context.Response.OutputStream.WriteAsync(buffer, 0, buffer.Length);
+                    context.Response.Close(); // Close the response stream
+                    http.Stop(); // Stop the listener
+
+                    if (string.IsNullOrEmpty(code))
+                    {
+                        MessageBox.Show("Authentication failed: No code received from Spotify.", "Authentication Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                        // Handle failed auth (e.g., close app, show error message)
+                        return;
+                    }
+
+                    var tokenRequest = new PKCETokenRequest(clientId, code, new Uri(redirectUri), verifier);
+                    var tokenResponse = await oauth.RequestToken(tokenRequest);
+
+                    Properties.Settings.Default.SpotifyAccessToken = tokenResponse.AccessToken;
+                    Properties.Settings.Default.SpotifyRefreshToken = tokenResponse.RefreshToken;
+                    Properties.Settings.Default.Save();
+
+                    spotify = new SpotifyClient(tokenResponse.AccessToken);
+                    StartPolling(); // Start polling after successful auth
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Authentication flow error: {ex.Message}");
+                MessageBox.Show($"Authentication failed: {ex.Message}", "Authentication Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                // Consider cleaning up tokens if auth fails definitively
+                Properties.Settings.Default.SpotifyAccessToken = null;
+                Properties.Settings.Default.SpotifyRefreshToken = null;
                 Properties.Settings.Default.Save();
-
-                spotify = new SpotifyClient(tokenResponse.AccessToken);
-                StartPolling();
             }
         }
 
+
         private async Task<bool> RefreshAccessToken(string clientId, string refreshToken, OAuthClient oauth)
         {
+            // Prevent null refresh token issue
+            if (string.IsNullOrEmpty(refreshToken))
+            {
+                Console.WriteLine("Cannot refresh token: Refresh token is missing.");
+                MessageBox.Show("Spotify session expired or invalid. Please log in again.", "Authentication Error", MessageBoxButton.OK, MessageBoxImage.Warning);
+                Properties.Settings.Default.SpotifyAccessToken = null; // Clear invalid tokens
+                Properties.Settings.Default.SpotifyRefreshToken = null;
+                Properties.Settings.Default.Save();
+                // Trigger full re-authentication
+                await StartAuthorizationCodeFlow(clientId, "http://127.0.0.1:5000/callback", oauth);
+                return false; // Indicate refresh wasn't successful (new auth started)
+            }
+
             try
             {
                 var refreshRequest = new PKCETokenRefreshRequest(clientId, refreshToken);
                 var tokenResponse = await oauth.RequestToken(refreshRequest);
 
-                // Save new access token
                 Properties.Settings.Default.SpotifyAccessToken = tokenResponse.AccessToken;
 
-                // Save new refresh token if provided
+                // Spotify might issue a new refresh token during refresh
                 if (!string.IsNullOrEmpty(tokenResponse.RefreshToken))
                 {
                     Properties.Settings.Default.SpotifyRefreshToken = tokenResponse.RefreshToken;
@@ -136,139 +177,238 @@ namespace SpottyScreen
 
                 Properties.Settings.Default.Save();
 
-                spotify = new SpotifyClient(tokenResponse.AccessToken);
+                spotify = new SpotifyClient(tokenResponse.AccessToken); // Update client with new token
+                Console.WriteLine("Access token refreshed successfully.");
                 return true;
             }
-            catch (Exception ex)
+            catch (APIException apiEx) // Catch specific API errors
             {
-                Console.WriteLine($"Token refresh failed: {ex.Message}");
-                MessageBox.Show("Spotify session expired. Please log in again.", "Authentication Error", MessageBoxButton.OK, MessageBoxImage.Error);
-                Properties.Settings.Default.SpotifyRefreshToken = null;
-                Properties.Settings.Default.Save();
+                Console.WriteLine($"Token refresh failed: {apiEx.Message}");
+                // Handle specific errors, e.g., invalid_grant often means refresh token is revoked/expired
+                if (apiEx.Response?.StatusCode == System.Net.HttpStatusCode.BadRequest)
+                {
+                    MessageBox.Show("Spotify session expired. Please log in again.", "Authentication Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                    Properties.Settings.Default.SpotifyAccessToken = null; // Clear invalid tokens
+                    Properties.Settings.Default.SpotifyRefreshToken = null;
+                    Properties.Settings.Default.Save();
+                    // Trigger full re-authentication
+                    await StartAuthorizationCodeFlow(clientId, "http://127.0.0.1:5000/callback", oauth);
+                }
+                else
+                {
+                    MessageBox.Show($"Failed to refresh Spotify session: {apiEx.Message}", "Authentication Error", MessageBoxButton.OK, MessageBoxImage.Warning);
+                }
+                return false;
+            }
+            catch (Exception ex) // Catch other unexpected errors
+            {
+                Console.WriteLine($"Unexpected error during token refresh: {ex.Message}");
+                MessageBox.Show($"An unexpected error occurred while refreshing the Spotify session: {ex.Message}", "Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                // Potentially clear tokens or attempt re-auth depending on the error
                 return false;
             }
         }
 
         private FullTrack currentTrack;
+        private bool isPolling = false; // Flag to prevent multiple polling loops
 
         private async void StartPolling()
         {
-            while (true)
+            if (isPolling) return; // Don't start if already polling
+            isPolling = true;
+            Console.WriteLine("Starting playback polling...");
+
+            while (isPolling) // Use the flag to control the loop
             {
+                if (spotify == null) // Check if client is valid
+                {
+                    Console.WriteLine("Spotify client not initialized. Stopping polling.");
+                    isPolling = false;
+                    // Optionally trigger re-authentication here
+                    // await AuthenticateSpotify(); // Be careful of infinite loops
+                    break;
+                }
+
+                CurrentlyPlaying playback = null;
                 try
                 {
-                    // Get current playback info
-                    var playback = await spotify.Player.GetCurrentPlayback();
+                    playback = await spotify.Player.GetCurrentlyPlaying(new PlayerCurrentlyPlayingRequest());
+
+                    // Check if track changed
                     if (playback?.Item is FullTrack track && track.Id != currentTrack?.Id)
                     {
+                        Console.WriteLine($"New track detected: {track.Name} by {string.Join(", ", track.Artists.Select(a => a.Name))}");
                         currentTrack = track;
-
-                        // Reset the UI and scroll logic for the new song
-                        ResetLyricsUI();
-                        UpdateUI(track);
-                        await LoadLyricsAsync(track);
+                        ResetLyricsUI(); // Reset UI state for the new song
+                        UpdateTrackInfoUI(track); // Update album art, track name etc.
+                        await LoadLyricsAsync(track); // Load new lyrics
+                    }
+                    else if (playback == null || playback.Item == null)
+                    {
+                        // Nothing is playing or playback state unavailable
+                        if (currentTrack != null)
+                        {
+                            Console.WriteLine("Playback stopped or unavailable.");
+                            // Optionally clear the UI or show a "Nothing Playing" message
+                            currentTrack = null; // Reset current track
+                            ResetLyricsUI();
+                            // Clear track info?
+                            // TrackName.Text = "Nothing Playing";
+                            // ArtistName.Text = ""; AlbumName.Text = ""; AlbumCover.Source = null; BlurredBackground.Source = null;
+                        }
                     }
 
-                    // Get the current playback position
-                    var playbackProgress = playback?.ProgressMs ?? 0;
-                    var playbackTime = TimeSpan.FromMilliseconds(playbackProgress);
+                    // Sync lyrics regardless of track change (if a track is playing)
+                    if (playback?.ProgressMs != null && currentTrack != null)
+                    {
+                        var playbackTime = TimeSpan.FromMilliseconds(playback.ProgressMs.Value);
+                        SyncLyricsWithPlayback(playbackTime);
+                    }
 
-                    // Sync lyrics with playback time
-                    SyncLyricsWithPlayback(playbackTime);
-
-                    // Shorter delay for smoother updates
-                    await Task.Delay(100); // Reduced to 100ms for better sync
+                    await Task.Delay(200); // Polling interval (adjust as needed)
                 }
                 catch (APIUnauthorizedException)
                 {
-                    Console.WriteLine("Access token expired, refreshing...");
-                    await RefreshAccessToken("41033dc65baf42e287b21398aafb4501", Properties.Settings.Default.SpotifyRefreshToken, new OAuthClient());
+                    Console.WriteLine("Access token expired during polling, attempting refresh...");
+                    isPolling = false; // Stop current polling loop
+                    bool refreshed = await RefreshAccessToken("41033dc65baf42e287b21398aafb4501", Properties.Settings.Default.SpotifyRefreshToken, new OAuthClient());
+                    if (refreshed)
+                    {
+                        StartPolling(); // Restart polling only if refresh succeeded
+                    }
+                    // If refresh failed, RefreshAccessToken handles showing errors/re-auth
+                    break; // Exit loop regardless, new one starts on success or user needs to re-auth
+                }
+                catch (APIException apiEx) // Handle other Spotify API errors
+                {
+                    Console.WriteLine($"Spotify API error during polling: {apiEx.Message} (Status: {apiEx.Response?.StatusCode})");
+                    // Potentially handle rate limiting (429) or other errors
+                    if (apiEx.Response?.StatusCode == (HttpStatusCode)429)
+                    {
+                        Console.WriteLine("Rate limited. Waiting longer before next poll...");
+                        await Task.Delay(5000); // Wait longer if rate limited
+                    }
+                    else
+                    {
+                        await Task.Delay(1000); // General delay for other API errors
+                    }
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"Error during polling: {ex.Message}");
+                    Console.WriteLine($"Unexpected error during polling: {ex.Message}");
+                    // Consider stopping polling or adding delays for unexpected errors
+                    await Task.Delay(2000);
                 }
             }
+            Console.WriteLine("Polling stopped.");
         }
 
         private void ResetLyricsUI()
         {
-            // Stop any ongoing scrolling logic
-            CompositionTarget.Rendering -= SmoothScrollHandler;
+            Application.Current.Dispatcher.Invoke(() =>
+            {
+                // Stop any ongoing smooth scrolling animation
+                CompositionTarget.Rendering -= SmoothScrollHandler;
 
-            // Clear lyrics and reset scroll state
-            LyricsPanel.Children.Clear();
-            LyricsScrollViewer.ScrollToVerticalOffset(0);
+                // Clear lyrics content and reset scroll position
+                LyricsPanel.Children.Clear();
+                LyricsScrollViewer.ScrollToVerticalOffset(0);
 
-            // Reset the current lyric index
-            currentLyricIndex = -1;
+                // Reset the current lyric index
+                currentLyricIndex = -1;
+                lyrics.Clear(); // Clear the backing list as well
+            });
         }
 
         private void SyncLyricsWithPlayback(TimeSpan playbackTime)
         {
-            // Find the closest lyric to the current playback time
-            int idx = lyrics.FindLastIndex(l => l.Time <= playbackTime);
+            if (lyrics == null || lyrics.Count == 0) return; // No lyrics loaded
 
-            if (idx != currentLyricIndex)
+            // Find the index of the last lyric line whose time is less than or equal to the current playback time
+            int newLyricIndex = -1;
+            for (int i = lyrics.Count - 1; i >= 0; i--)
             {
-                currentLyricIndex = idx;
+                if (lyrics[i].Time <= playbackTime)
+                {
+                    newLyricIndex = i;
+                    break;
+                }
+            }
 
-                // Update UI to highlight the current lyric
+            // Update UI only if the index has changed
+            if (newLyricIndex != currentLyricIndex)
+            {
+                // Debugging: Log index change
+                // Console.WriteLine($"Lyric index changing from {currentLyricIndex} to {newLyricIndex} at {playbackTime}");
+                currentLyricIndex = newLyricIndex;
+
+                // Update UI on the main thread
                 Application.Current.Dispatcher.Invoke(() =>
                 {
-                    UpdateLyricsDisplay(idx);
+                    UpdateLyricsHighlighting(currentLyricIndex);
+                    ScrollToCurrentLyric(currentLyricIndex);
                 });
             }
         }
 
-        private void UpdateLyricsDisplay(int currentIndex)
+        // Renamed from UpdateLyricsDisplay to avoid confusion
+        // This method now ONLY handles highlighting and assumes TextBlocks exist
+        private void UpdateLyricsHighlighting(int highlightIndex)
         {
-            // Clear existing children only if necessary
-            if (LyricsPanel.Children.Count != lyrics.Count)
-            {
-                LyricsPanel.Children.Clear();
-
-                foreach (var lyric in lyrics)
-                {
-                    var tb = new TextBlock
-                    {
-                        Text = lyric.Text,
-                        FontSize = 32,
-                        Foreground = Brushes.White,
-                        FontFamily = new FontFamily("Segoe UI Variable"),
-                        TextWrapping = TextWrapping.Wrap,
-                        TextAlignment = TextAlignment.Center,
-                        TextTrimming = TextTrimming.None
-                    };
-
-                    LyricsPanel.Children.Add(tb);
-                }
-            }
-
-            // Update the highlighting
             for (int i = 0; i < LyricsPanel.Children.Count; i++)
             {
-                var tb = (TextBlock)LyricsPanel.Children[i];
-
-                if (i == currentIndex)
+                if (LyricsPanel.Children[i] is TextBlock tb)
                 {
-                    tb.Foreground = Brushes.White; // Highlight current lyric
-                    tb.FontSize = 52;
-                    tb.Opacity = 1;
-                }
-                else
-                {
-                    tb.Foreground = Brushes.Gray;
-                    tb.FontSize = 40;
-                    tb.Opacity = 0.5;
+                    bool isCurrent = (i == highlightIndex);
+                    tb.Foreground = isCurrent ? Brushes.White : Brushes.Gray;
+                    tb.FontSize = isCurrent ? 52 : 40;
+                    tb.Opacity = isCurrent ? 1.0 : 0.5;
+                    // Optional: Add a subtle effect like bolding the current line
+                    // tb.FontWeight = isCurrent ? FontWeights.SemiBold : FontWeights.Normal;
                 }
             }
-
-            // Smoothly scroll to the current lyric
-            ScrollToCurrentLyric(currentIndex);
         }
 
-        private async void UpdateUI(FullTrack track)
+        // This method populates the LyricsPanel initially or after loading new lyrics
+        private void PopulateLyricsPanel()
+        {
+            LyricsPanel.Children.Clear(); // Clear previous lyrics before adding new ones
+
+            if (lyrics == null || lyrics.Count == 0)
+            {
+                ShowNoLyricsMessage();
+                return;
+            }
+
+            // Calculate MaxWidth based on ScrollViewer, leave some padding
+            double maxWidth = Math.Max(200, LyricsScrollViewer.ActualWidth - 40); // Ensure minimum width, subtract padding
+
+            foreach (var lyric in lyrics)
+            {
+                var tb = new TextBlock
+                {
+                    Text = lyric.Text,
+                    FontSize = 40, // Initial size for non-highlighted
+                    Foreground = Brushes.Gray, // Initial color
+                    Opacity = 0.5, // Initial opacity
+                    FontFamily = new FontFamily("Segoe UI Variable"), // Consider making this configurable
+                    TextWrapping = TextWrapping.Wrap, // Ensure wrapping is enabled
+                    TextAlignment = TextAlignment.Center, // Center align the text within the block
+                    HorizontalAlignment = HorizontalAlignment.Stretch, // Stretch to use available width (important for wrapping)
+                    MaxWidth = maxWidth, // Apply calculated MaxWidth
+                    Margin = new Thickness(0, 5, 0, 5) // Add some vertical spacing
+                    // Removed TextTrimming.None - Wrap should handle it.
+                };
+                LyricsPanel.Children.Add(tb);
+            }
+
+            // After populating, ensure the initial highlight state is correct
+            UpdateLyricsHighlighting(currentLyricIndex);
+            ScrollToCurrentLyric(currentLyricIndex); // Scroll to the correct position if resuming playback mid-song
+        }
+
+
+        private void UpdateTrackInfoUI(FullTrack track)
         {
             TrackName.Text = track.Name;
             ArtistName.Text = string.Join(", ", track.Artists.Select(a => a.Name));
@@ -308,221 +448,246 @@ namespace SpottyScreen
         {
             var artist = track.Artists.FirstOrDefault()?.Name ?? "";
             var title = track.Name;
-            var album = track.Album.Name;
+            var album = track.Album.Name; // Using album name might improve accuracy
 
-            // Clear previous lyrics
-            lyrics.Clear();
-            LyricsPanel.Children.Clear();
+            Console.WriteLine($"Searching lyrics for: {title} - {artist} ({album})");
+
+            lyrics.Clear(); // Clear previous lyrics list
+            currentLyricIndex = -1; // Reset index
+
+            // Use a more robust URL encoding library if available, but EscapeDataString is usually sufficient
+            var url = $"https://lrclib.net/api/search?artist_name={Uri.EscapeDataString(artist)}&track_name={Uri.EscapeDataString(title)}&album_name={Uri.EscapeDataString(album)}";
 
             using (var client = new HttpClient())
             {
-                var url = $"https://lrclib.net/api/search?artist_name={Uri.EscapeDataString(artist)}&track_name={Uri.EscapeDataString(title)}&album_name={Uri.EscapeDataString(album)}";
-
+                // Add a user-agent, some APIs require it
+                client.DefaultRequestHeaders.UserAgent.ParseAdd("SpottyScreen/1.0");
                 try
                 {
-                    // Fetch the response
-                    var json = await client.GetStringAsync(url);
+                    var response = await client.GetAsync(url);
+                    response.EnsureSuccessStatusCode(); // Throw exception for bad status codes
+                    var json = await response.Content.ReadAsStringAsync();
 
                     var data = JArray.Parse(json);
 
                     if (data.Count > 0)
                     {
+                        // Prioritize synced lyrics, fall back to plain lyrics if needed
                         var syncedLyricsToken = data[0]["syncedLyrics"]?.ToString();
+                        var plainLyricsToken = data[0]["plainLyrics"]?.ToString();
 
                         if (!string.IsNullOrEmpty(syncedLyricsToken))
                         {
-                            // Use regular expression to match timestamp and lyrics
-                            var regex = new System.Text.RegularExpressions.Regex(@"\[(\d{2}):(\d{2}\.\d{2})\](.*)");
-
-                            // Match all lines in the syncedLyrics
+                            Console.WriteLine("Found synced lyrics.");
+                            // Regex to capture minutes, seconds (including fractional), and text
+                            var regex = new Regex(@"\[(\d{2}):(\d{2}\.\d{2,3})\](.*)");
                             var matches = regex.Matches(syncedLyricsToken);
 
-                            foreach (System.Text.RegularExpressions.Match match in matches)
+                            foreach (Match match in matches)
                             {
                                 if (match.Groups.Count >= 4)
                                 {
                                     try
                                     {
-                                        var minute = int.Parse(match.Groups[1].Value);  // Minutes
-                                        var seconds = double.Parse(match.Groups[2].Value);  // Seconds + tenths
-                                        var lyric = match.Groups[3].Value.Trim();  // Lyric text
+                                        int minutes = int.Parse(match.Groups[1].Value);
+                                        // Use decimal for precision with fractional seconds
+                                        decimal seconds = decimal.Parse(match.Groups[2].Value, System.Globalization.CultureInfo.InvariantCulture);
+                                        string text = match.Groups[3].Value.Trim();
 
-                                        // Convert to TimeSpan
-                                        var time = new TimeSpan(0, 0, minute, (int)seconds, (int)((seconds - (int)seconds) * 1000));  // Convert to TimeSpan
+                                        // Convert decimal seconds to TimeSpan
+                                        long ticks = (long)(minutes * 60 * TimeSpan.TicksPerSecond + seconds * TimeSpan.TicksPerSecond);
+                                        var time = TimeSpan.FromTicks(ticks);
 
-                                        lyrics.Add(new LyricLine
+                                        // Add only if the line has text content
+                                        if (!string.IsNullOrWhiteSpace(text))
                                         {
-                                            Time = time,
-                                            Text = lyric
-                                        });
+                                            lyrics.Add(new LyricLine { Time = time, Text = text });
+                                        }
                                     }
-                                    catch (Exception ex)
+                                    catch (FormatException ex)
                                     {
-                                        Console.WriteLine($"Error parsing lyric line: {match.Value}. Exception: {ex.Message}");
+                                        Console.WriteLine($"Error parsing lyric timestamp/format: {match.Value}. Exception: {ex.Message}");
+                                    }
+                                    catch (Exception ex) // Catch other potential parsing errors
+                                    {
+                                        Console.WriteLine($"Generic error parsing lyric line: {match.Value}. Exception: {ex.Message}");
                                     }
                                 }
                             }
-
-                            // Sort lyrics based on time
+                            // Sort by time just in case the source isn't perfectly ordered
                             lyrics.Sort((a, b) => a.Time.CompareTo(b.Time));
+                            Console.WriteLine($"Successfully parsed {lyrics.Count} synced lyric lines.");
                         }
                         else
                         {
-                            Console.WriteLine("No syncedLyrics found in the response.");
-                            ShowNoLyricsMessage();
+                            Console.WriteLine("No lyrics found in the first result.");
+                            // No need to call ShowNoLyricsMessage here, PopulateLyricsPanel will handle empty list
                         }
                     }
                     else
                     {
-                        Console.WriteLine("No data found in the API response.");
-                        ShowNoLyricsMessage();
+                        Console.WriteLine("No results found from lrclib API.");
+                        // PopulateLyricsPanel will handle empty list
                     }
+                }
+                catch (HttpRequestException httpEx)
+                {
+                    Console.WriteLine($"HTTP error fetching lyrics: {httpEx.Message} (URL: {url})");
+                    // PopulateLyricsPanel will handle empty list
+                }
+                catch (Newtonsoft.Json.JsonException jsonEx)
+                {
+                    Console.WriteLine($"Error parsing JSON response from lrclib: {jsonEx.Message}");
+                    // PopulateLyricsPanel will handle empty list
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine("Error while fetching lyrics: " + ex.Message);
-                    ShowNoLyricsMessage();
+                    Console.WriteLine($"Unexpected error fetching/parsing lyrics: {ex.Message}");
+                    // PopulateLyricsPanel will handle empty list
                 }
             }
 
-            // Debug log: Ensure lyrics are loaded correctly
-            Console.WriteLine($"Loaded {lyrics.Count} lyric lines.");
+            // Update the UI panel with the loaded lyrics (or "No lyrics" message)
+            Application.Current.Dispatcher.Invoke(PopulateLyricsPanel);
 
-            Application.Current.Dispatcher.Invoke(() =>
-            {
-                UpdateLyricsDisplay(-1); // Force initial render of all lyrics in gray
-            });
-
-            StartLyricSync();
+            // No need to call StartLyricSync - the main polling loop handles syncing
+            // StartLyricSync(); // Removed
         }
 
-        // Method to show a "No lyrics found" message
         private void ShowNoLyricsMessage()
         {
-            var noLyricsTextBlock = new TextBlock
+            // Ensure this runs on the UI thread
+            Application.Current.Dispatcher.Invoke(() =>
             {
-                Text = "No lyrics found",
-                Foreground = Brushes.White,
-                FontSize = 40,
-                FontFamily = new FontFamily("Segoe UI Variable"),
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center,
-                TextWrapping = TextWrapping.Wrap,
-                MaxWidth = 600,
-                Margin = new Thickness(20)
-            };
+                LyricsPanel.Children.Clear(); // Clear any previous content
 
-            // Add the message to the lyrics panel
-            LyricsPanel.Children.Add(noLyricsTextBlock);
-        }
+                // Consider making the "No lyrics" message style consistent
+                double maxWidth = Math.Max(200, LyricsScrollViewer.ActualWidth - 40);
 
-        private async void UpdateLyricsDisplay()
-        {
-            var playback = await spotify.Player.GetCurrentlyPlaying(new PlayerCurrentlyPlayingRequest());
-            var playbackTime = TimeSpan.FromMilliseconds(playback?.ProgressMs ?? 0); // Ensure playback time is calculated correctly
-
-            int idx = lyrics.FindLastIndex(l => l.Time <= playbackTime);
-
-            if (idx != currentLyricIndex)
-            {
-                currentLyricIndex = idx;
-
-                Application.Current.Dispatcher.Invoke(() =>
+                var noLyricsTextBlock = new TextBlock
                 {
-                    LyricsPanel.Children.Clear();
-
-                    for (int i = 0; i < lyrics.Count; i++)
-                    {
-                        var tb = new TextBlock
-                        {
-                            Text = lyrics[i].Text,
-                            Foreground = i == idx ? Brushes.White : Brushes.Gray, // Highlight current lyric
-                            FontSize = i == idx ? 52 : 40,
-                            Opacity = i == idx ? 1 : 0.5,
-                            FontFamily = new FontFamily("Segoe UI Variable"),
-                            Margin = new Thickness(0, 4, 0, 4),
-                            TextWrapping = TextWrapping.Wrap,
-                            HorizontalAlignment = HorizontalAlignment.Center, // Center text horizontally
-                            TextAlignment = TextAlignment.Center,
-                            VerticalAlignment = VerticalAlignment.Center
-                        };
-
-                        LyricsPanel.Children.Add(tb);
-                    }
-
-                    ScrollToCurrentLyric(idx);
-                });
-            }
+                    Text = "Lyrics not found for this track.",
+                    Foreground = Brushes.Gray, // Use a less prominent color
+                    FontSize = 30, // Slightly smaller than regular lyrics
+                    FontFamily = new FontFamily("Segoe UI Variable"),
+                    TextWrapping = TextWrapping.Wrap,
+                    TextAlignment = TextAlignment.Center,
+                    HorizontalAlignment = HorizontalAlignment.Stretch, // Stretch to center properly
+                    VerticalAlignment = VerticalAlignment.Center, // Center vertically if panel allows
+                    MaxWidth = maxWidth, // Apply width constraint
+                    Margin = new Thickness(20) // Add some margin
+                };
+                LyricsPanel.Children.Add(noLyricsTextBlock);
+            });
         }
+
+
+        // Removed the parameterless UpdateLyricsDisplay as it's redundant with SyncLyricsWithPlayback
+        // private async void UpdateLyricsDisplay() { ... }
+
 
         private void ScrollToCurrentLyric(int currentIndex)
         {
-            if (LyricsScrollViewer == null || currentIndex < 0 || currentIndex >= LyricsPanel.Children.Count)
-                return;
-
-            var currentLyric = LyricsPanel.Children[currentIndex] as TextBlock;
-            if (currentLyric == null || !currentLyric.IsLoaded)
-                return;
-
-            // Make sure layout is ready before measuring
-            currentLyric.Dispatcher.InvokeAsync(() =>
+            // Basic checks
+            if (LyricsScrollViewer == null || LyricsPanel.Children.Count == 0 || currentIndex < 0 || currentIndex >= LyricsPanel.Children.Count)
             {
+                // If index is -1 (before first lyric), scroll to top
+                if (currentIndex == -1)
+                {
+                    Application.Current.Dispatcher.InvokeAsync(() => LyricsScrollViewer.ScrollToVerticalOffset(0), DispatcherPriority.Background);
+                }
+                return;
+            }
+
+
+            var currentElement = LyricsPanel.Children[currentIndex] as FrameworkElement; // Use FrameworkElement for ActualHeight
+
+            if (currentElement == null) return;
+
+            // Use Dispatcher.InvokeAsync with Background priority to ensure layout is updated
+            Application.Current.Dispatcher.InvokeAsync(() =>
+            {
+                if (!currentElement.IsLoaded) return; // Check if element is ready
+
                 try
                 {
-                    // Get current offset
+                    // Calculate the target vertical offset to center the item
                     double currentOffset = LyricsScrollViewer.VerticalOffset;
+                    double viewportHeight = LyricsScrollViewer.ViewportHeight;
 
-                    // Transform lyric position relative to the ScrollViewer
-                    GeneralTransform transform = currentLyric.TransformToAncestor(LyricsScrollViewer);
-                    Point position = transform.Transform(new Point(0, 0));
+                    // Get the position of the top of the element relative to the ScrollViewer content area
+                    GeneralTransform transform = currentElement.TransformToAncestor(LyricsPanel); // Transform relative to the panel first
+                    Point elementTopInPanel = transform.Transform(new Point(0, 0));
 
-                    // Calculate centered target offset
-                    double targetOffset = currentOffset + position.Y - (LyricsScrollViewer.ViewportHeight / 2) + (currentLyric.ActualHeight / 2);
+                    // Center position calculation
+                    double targetOffset = elementTopInPanel.Y - (viewportHeight / 2.0) + (currentElement.ActualHeight / 2.0);
 
-                    // Clamp the value to avoid negative scrolls
-                    targetOffset = Math.Max(0, targetOffset);
+                    // Clamp the target offset to be within valid scroll range [0, ScrollableHeight]
+                    targetOffset = Math.Max(0, Math.Min(targetOffset, LyricsScrollViewer.ScrollableHeight));
 
-                    // Remove any existing handler
+                    // Stop previous animation if running
                     CompositionTarget.Rendering -= SmoothScrollHandler;
 
-                    // Animate toward the target offset
+                    // Simple animation loop using CompositionTarget.Rendering
+                    double startOffset = currentOffset;
+                    double distance = targetOffset - startOffset;
+                    double duration = 0.3; // Animation duration in seconds
+                    double startTime = -1;
+
                     SmoothScrollHandler = (s, e) =>
                     {
-                        currentOffset += (targetOffset - currentOffset) * 0.2;
-                        LyricsScrollViewer.ScrollToVerticalOffset(currentOffset);
+                        if (startTime < 0) startTime = (e as RenderingEventArgs)?.RenderingTime.TotalSeconds ?? 0;
 
-                        if (Math.Abs(targetOffset - currentOffset) < 1)
+                        double elapsed = ((e as RenderingEventArgs)?.RenderingTime.TotalSeconds ?? startTime) - startTime;
+                        double progress = Math.Min(1.0, elapsed / duration); // Normalized progress [0, 1]
+
+                        // Simple easing (quadratic ease-out)
+                        double easeProgress = 1.0 - Math.Pow(1.0 - progress, 2);
+
+                        double newOffset = startOffset + distance * easeProgress;
+
+                        LyricsScrollViewer.ScrollToVerticalOffset(newOffset);
+
+                        // Stop when close enough or duration exceeded
+                        if (progress >= 1.0 || Math.Abs(targetOffset - newOffset) < 1.0)
                         {
-                            LyricsScrollViewer.ScrollToVerticalOffset(targetOffset);
+                            LyricsScrollViewer.ScrollToVerticalOffset(targetOffset); // Ensure final position
                             CompositionTarget.Rendering -= SmoothScrollHandler;
+                            SmoothScrollHandler = null; // Clear handler reference
                         }
                     };
 
                     CompositionTarget.Rendering += SmoothScrollHandler;
                 }
+                catch (InvalidOperationException invEx)
+                {
+                    // This can happen if the element is not visually connected correctly
+                    Console.WriteLine($"Scroll error (InvalidOperationException): {invEx.Message}. Element might not be in visual tree.");
+                }
                 catch (Exception ex)
                 {
-                    Console.WriteLine("Scroll error: " + ex.Message);
+                    Console.WriteLine($"Generic scroll error: {ex.Message}");
                 }
-            }, DispatcherPriority.Background);
+            }, DispatcherPriority.Background); // Use Background priority
         }
 
-
-        // Event handler reference for smooth scrolling
+        // Store the handler reference to remove it correctly
         private EventHandler SmoothScrollHandler;
 
-        private void StartLyricSync()
-        {
-            lyricTimer.Stop();
-            lyricTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) }; // Adjusted to a reasonable interval
-            lyricTimer.Tick += (s, e) => Application.Current.Dispatcher.Invoke(UpdateLyricsDisplay);
-            lyricTimer.Start();
-        }
 
+        // Removed - Timer logic replaced by main polling loop
+        // private void StartLyricSync() { ... }
+
+        // LyricLine class remains the same
         private class LyricLine
         {
             public TimeSpan Time { get; set; }
             public string Text { get; set; }
+
+            public override string ToString() // For debugging
+            {
+                return $"[{Time:mm\\:ss\\.ff}] {Text}";
+            }
         }
     }
 }
