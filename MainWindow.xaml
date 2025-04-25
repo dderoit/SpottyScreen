@@ -25,7 +25,8 @@
                 <TextBlock x:Name="TrackName" FontSize="48" Foreground="White" FontFamily="Segoe UI Variable" FontWeight="Bold"/>
                 <TextBlock x:Name="ArtistName" FontSize="28" Foreground="#DDDDDD" FontFamily="Segoe UI Variable"/>
                 <TextBlock x:Name="AlbumName" FontSize="24" Foreground="#AAAAAA" FontFamily="Segoe UI Variable" Margin="0,0,0,40"/>
-                <ScrollViewer VerticalScrollBarVisibility="Hidden" Height="300">
+
+                <ScrollViewer x:Name="LyricsScrollViewer" VerticalScrollBarVisibility="Hidden" HorizontalScrollBarVisibility="Hidden" IsHitTestVisible="False" Height="300">
                     <StackPanel x:Name="LyricsPanel"/>
                 </ScrollViewer>
             </StackPanel>
