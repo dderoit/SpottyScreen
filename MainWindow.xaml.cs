@@ -26,6 +26,7 @@ namespace SpottyScreen
         private SpotifyClient spotify;
         private List<LyricLine> lyrics = new List<LyricLine>();
         private int currentLyricIndex = -1;
+        private DispatcherTimer progressTimer;
         // private DispatcherTimer lyricTimer = new DispatcherTimer(); // Removed redundant timer
 
         public MainWindow()
@@ -98,6 +99,7 @@ namespace SpottyScreen
                 {
                     http.Prefixes.Add("http://127.0.0.1:5000/callback/"); // Ensure trailing slash
                     http.Start();
+                    WindowState = WindowState.Minimized;
 
                     Process.Start(new ProcessStartInfo
                     {
@@ -116,6 +118,7 @@ namespace SpottyScreen
                     await context.Response.OutputStream.WriteAsync(buffer, 0, buffer.Length);
                     context.Response.Close(); // Close the response stream
                     http.Stop(); // Stop the listener
+                    WindowState = WindowState.Maximized;
 
                     if (string.IsNullOrEmpty(code))
                     {
@@ -214,18 +217,21 @@ namespace SpottyScreen
 
         private async void StartPolling()
         {
-            if (isPolling) return; // Don't start if already polling
+            if (isPolling) return;
             isPolling = true;
             Console.WriteLine("Starting playback polling...");
 
-            while (isPolling) // Use the flag to control the loop
+            while (isPolling)
             {
-                if (spotify == null) // Check if client is valid
+                if (spotify == null)
                 {
                     Console.WriteLine("Spotify client not initialized. Stopping polling.");
                     isPolling = false;
-                    // Optionally trigger re-authentication here
-                    // await AuthenticateSpotify(); // Be careful of infinite loops
+                    Application.Current.Dispatcher.Invoke(() =>
+                    {
+                        progressTimer?.Stop();
+                        PlaybackProgressBar.Value = 0;
+                    });
                     break;
                 }
 
@@ -234,73 +240,108 @@ namespace SpottyScreen
                 {
                     playback = await spotify.Player.GetCurrentlyPlaying(new PlayerCurrentlyPlayingRequest());
 
-                    // Check if track changed
+                    // Track changed
                     if (playback?.Item is FullTrack track && track.Id != currentTrack?.Id)
                     {
                         Console.WriteLine($"New track detected: {track.Name} by {string.Join(", ", track.Artists.Select(a => a.Name))}");
                         currentTrack = track;
-                        ResetLyricsUI(); // Reset UI state for the new song
-                        UpdateTrackInfoUI(track); // Update album art, track name etc.
-                        await LoadLyricsAsync(track); // Load new lyrics
+                        ResetLyricsUI();
+                        UpdateTrackInfoUI(track);
+                        await LoadLyricsAsync(track);
+                        InitializeProgressBar(track.DurationMs);
                     }
+                    // Playback stopped or no item
                     else if (playback == null || playback.Item == null)
                     {
-                        // Nothing is playing or playback state unavailable
                         if (currentTrack != null)
                         {
                             Console.WriteLine("Playback stopped or unavailable.");
-                            // Optionally clear the UI or show a "Nothing Playing" message
-                            currentTrack = null; // Reset current track
+                            currentTrack = null;
                             ResetLyricsUI();
-                            // Clear track info?
-                            // TrackName.Text = "Nothing Playing";
-                            // ArtistName.Text = ""; AlbumName.Text = ""; AlbumCover.Source = null; BlurredBackground.Source = null;
+                            Application.Current.Dispatcher.Invoke(() =>
+                            {
+                                progressTimer?.Stop();
+                                PlaybackProgressBar.Value = 0;
+                            });
                         }
                     }
 
-                    // Sync lyrics regardless of track change (if a track is playing)
+                    // Update lyrics and progress bar
                     if (playback?.ProgressMs != null && currentTrack != null)
                     {
-                        var playbackTime = TimeSpan.FromMilliseconds(playback.ProgressMs.Value);
+                        var playbackMs = playback.ProgressMs.Value;
+                        Application.Current.Dispatcher.Invoke(() =>
+                        {
+                            PlaybackProgressBar.Value = playbackMs;
+                        });
+
+                        var playbackTime = TimeSpan.FromMilliseconds(playbackMs);
                         SyncLyricsWithPlayback(playbackTime);
                     }
 
-                    await Task.Delay(200); // Polling interval (adjust as needed)
+                    await Task.Delay(200);
                 }
                 catch (APIUnauthorizedException)
                 {
                     Console.WriteLine("Access token expired during polling, attempting refresh...");
-                    isPolling = false; // Stop current polling loop
+                    isPolling = false;
                     bool refreshed = await RefreshAccessToken("41033dc65baf42e287b21398aafb4501", Properties.Settings.Default.SpotifyRefreshToken, new OAuthClient());
                     if (refreshed)
                     {
-                        StartPolling(); // Restart polling only if refresh succeeded
+                        StartPolling();
                     }
-                    // If refresh failed, RefreshAccessToken handles showing errors/re-auth
-                    break; // Exit loop regardless, new one starts on success or user needs to re-auth
+                    break;
                 }
-                catch (APIException apiEx) // Handle other Spotify API errors
+                catch (APIException apiEx)
                 {
                     Console.WriteLine($"Spotify API error during polling: {apiEx.Message} (Status: {apiEx.Response?.StatusCode})");
-                    // Potentially handle rate limiting (429) or other errors
                     if (apiEx.Response?.StatusCode == (HttpStatusCode)429)
-                    {
-                        Console.WriteLine("Rate limited. Waiting longer before next poll...");
-                        await Task.Delay(5000); // Wait longer if rate limited
-                    }
+                        await Task.Delay(5000);
                     else
-                    {
-                        await Task.Delay(1000); // General delay for other API errors
-                    }
+                        await Task.Delay(1000);
                 }
                 catch (Exception ex)
                 {
                     Console.WriteLine($"Unexpected error during polling: {ex.Message}");
-                    // Consider stopping polling or adding delays for unexpected errors
                     await Task.Delay(2000);
                 }
             }
+
             Console.WriteLine("Polling stopped.");
+        }
+
+        // Initializes the progress bar for a new track and starts a DispatcherTimer for smooth updates
+        private void InitializeProgressBar(int trackDurationMs)
+        {
+            Application.Current.Dispatcher.Invoke(() =>
+            {
+                PlaybackProgressBar.Maximum = trackDurationMs;
+                PlaybackProgressBar.Value = 0;
+
+                if (progressTimer != null)
+                {
+                    progressTimer.Stop();
+                    progressTimer.Tick -= ProgressTimer_Tick;
+                }
+
+                progressTimer = new DispatcherTimer
+                {
+                    Interval = TimeSpan.FromMilliseconds(50)
+                };
+                progressTimer.Tick += ProgressTimer_Tick;
+                progressTimer.Start();
+            });
+        }
+
+        // Handler to smoothly increment the progress bar between Spotify polls
+        private void ProgressTimer_Tick(object sender, EventArgs e)
+        {
+            if (PlaybackProgressBar.Value < PlaybackProgressBar.Maximum)
+            {
+                PlaybackProgressBar.Value = Math.Min(
+                    PlaybackProgressBar.Value + progressTimer.Interval.TotalMilliseconds,
+                    PlaybackProgressBar.Maximum);
+            }
         }
 
         private void ResetLyricsUI()
@@ -407,7 +448,6 @@ namespace SpottyScreen
             ScrollToCurrentLyric(currentLyricIndex); // Scroll to the correct position if resuming playback mid-song
         }
 
-
         private void UpdateTrackInfoUI(FullTrack track)
         {
             TrackName.Text = track.Name;
@@ -415,23 +455,126 @@ namespace SpottyScreen
             AlbumName.Text = track.Album.Name;
 
             var imageUrl = track.Album.Images.FirstOrDefault()?.Url;
-            if (!string.IsNullOrEmpty(imageUrl))
+            if (string.IsNullOrEmpty(imageUrl))
+                return;
+
+            var bitmap = new BitmapImage();
+            bitmap.BeginInit();
+            bitmap.UriSource = new Uri(imageUrl);
+            bitmap.CacheOption = BitmapCacheOption.OnLoad;
+            bitmap.EndInit();
+
+            bitmap.DownloadCompleted += async (s, e) =>
             {
-                var bitmap = new BitmapImage(new Uri(imageUrl));
-
-                // Ensure the image is loaded before animation starts
-                bitmap.DownloadCompleted += (s, e) =>
-                {
-                    AlbumCover.Source = bitmap;
-                    BlurredBackground.Source = bitmap;
-
-                    // Now that the image is loaded, start the animation
-                    StartImageTransition();
-                };
-
-                // Start loading the image
                 AlbumCover.Source = bitmap;
-                BlurredBackground.Source = bitmap;
+                StartImageTransition();
+
+                // Extract color palette
+                using (var webClient = new WebClient())
+                {
+                    byte[] data = await webClient.DownloadDataTaskAsync(imageUrl);
+                    using (var ms = new MemoryStream(data))
+                    using (var bmp = new System.Drawing.Bitmap(ms))
+                    {
+                        var colorThief = new ColorThief();
+                        var palette = await Task.Run(() => colorThief.GetPalette(bmp, 5, 10));
+
+                        if (palette != null && palette.Any())
+                        {
+                            // Get the two darkest colors
+                            var darkColors = palette
+                                .Select(p => p.Color)
+                                .OrderBy(c => 0.299 * c.R + 0.587 * c.G + 0.114 * c.B)
+                                .Take(2)
+                                .ToList();
+
+                            if (darkColors.Count >= 2)
+                            {
+                                var gradient = new LinearGradientBrush
+                                {
+                                    StartPoint = new Point(0, 0),
+                                    EndPoint = new Point(1, 1),
+                                    GradientStops = new GradientStopCollection
+                            {
+                                new GradientStop(
+                                    System.Windows.Media.Color.FromRgb(darkColors[0].R, darkColors[0].G, darkColors[0].B), 0),
+                                new GradientStop(
+                                    System.Windows.Media.Color.FromRgb(darkColors[1].R, darkColors[1].G, darkColors[1].B), 1)
+                            }
+                                };
+
+                                BlurredBackground.Background = gradient;
+                            }
+                        }
+
+                        // Set progress bar color separately
+                        await SetProgressBarColorFromUrl(imageUrl);
+                    }
+                }
+            };
+
+            AlbumCover.Source = bitmap;
+        }
+
+        /// <summary>
+        /// Downloads the album‐art bytes, creates a System.Drawing.Bitmap for ColorThief,
+        /// finds the dominant color, and then sets the ProgressBar foreground to that color.
+        /// </summary>
+        private async Task SetProgressBarColorFromUrl(string imageUrl)
+        {
+            try
+            {
+                using (var webClient = new WebClient())
+                {
+                    byte[] data = await webClient.DownloadDataTaskAsync(imageUrl);
+                    using (var ms = new MemoryStream(data))
+                    using (var bmp = new System.Drawing.Bitmap(ms))
+                    {
+                        var colorThief = new ColorThief();
+                        var palette = await Task.Run(() => colorThief.GetPalette(bmp, 5, 10));
+
+                        if (palette != null && palette.Any())
+                        {
+                            var white = new { R = 255, G = 255, B = 255 };
+
+                            // Filter colors not too close to white
+                            var filteredColors = palette
+                                .Select(p => p.Color) // Assuming p.Color is a ColorThief color with R, G, B
+                                .Where(c =>
+                                {
+                                    double distanceToWhite = Math.Sqrt(
+                                        Math.Pow(c.R - white.R, 2) +
+                                        Math.Pow(c.G - white.G, 2) +
+                                        Math.Pow(c.B - white.B, 2));
+                                    return distanceToWhite > 100; // if >100, not too close to white
+                                });
+
+                            // Pick the most prominent color based on luminance
+                            var chosen = filteredColors
+                                .OrderByDescending(c => 0.299 * c.R + 0.587 * c.G + 0.114 * c.B)
+                                .FirstOrDefault();
+
+                            // Fallback: choose the lightest color in the palette if no suitable color found
+                            if (chosen.R == 0 && chosen.G == 0 && chosen.B == 0)
+                            {
+                                // No valid color found, pick gray as fallback
+                                chosen = new ColorThiefDotNet.Color() { R = 169, G = 169, B = 169 };
+                            }
+
+                            // Convert ColorThief color to WPF SolidColorBrush
+                            var brush = new SolidColorBrush(
+                                System.Windows.Media.Color.FromRgb(chosen.R, chosen.G, chosen.B));
+                            Application.Current.Dispatcher.Invoke(() =>
+                            {
+                                PlaybackProgressBar.Foreground = brush;
+                            });
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Failed to extract color for progress bar: {ex.Message}");
             }
         }
 

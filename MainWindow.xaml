@@ -5,7 +5,7 @@
         Title="Spotty Screen"
         Background="Black" AllowsTransparency="True">
     <Grid x:Name="RootGrid">
-        <Image x:Name="BlurredBackground" Stretch="UniformToFill" Opacity="0.3"/>
+        <Border x:Name="BlurredBackground" Background="Black" BorderThickness="0"/>
         <Rectangle>
             <Rectangle.Fill>
                 <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
@@ -20,26 +20,24 @@
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
             <Border Width="400" Height="400" CornerRadius="20" Margin="20">
-                <Image x:Name="AlbumCover" Stretch="UniformToFill"/>
+                <Image x:Name="AlbumCover" Stretch="UniformToFill">
+                    <Image.Resources>
+                        <Style TargetType="Border">
+                            <Setter Property="CornerRadius" Value="30"/>
+                        </Style>
+                    </Image.Resources>
+                </Image>
             </Border>
-            <!-- Right-side layout with vertical structure -->
             <Grid Grid.Column="1" Margin="40">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
-                    <!-- Track name -->
                     <RowDefinition Height="Auto"/>
-                    <!-- Artist name -->
                     <RowDefinition Height="Auto"/>
-                    <!-- Album name -->
                     <RowDefinition Height="*"/>
-                    <!-- Lyrics scroll area -->
                 </Grid.RowDefinitions>
-
                 <TextBlock x:Name="TrackName" Grid.Row="0" FontSize="48" Foreground="White" FontFamily="Segoe UI Variable" FontWeight="Bold"/>
                 <TextBlock x:Name="ArtistName" Grid.Row="1" FontSize="28" Foreground="#DDDDDD" FontFamily="Segoe UI Variable"/>
                 <TextBlock x:Name="AlbumName" Grid.Row="2" FontSize="24" Foreground="#AAAAAA" FontFamily="Segoe UI Variable" Margin="0,0,0,40"/>
-
-                <!-- Now it stretches properly and scrolls! -->
                 <ScrollViewer Grid.Row="3" x:Name="LyricsScrollViewer"
                               VerticalScrollBarVisibility="Hidden"
                               HorizontalScrollBarVisibility="Hidden"
@@ -48,5 +46,40 @@
                 </ScrollViewer>
             </Grid>
         </Grid>
+
+        <ProgressBar x:Name="PlaybackProgressBar"
+             Height="8"
+             VerticalAlignment="Bottom"
+             Margin="100,0,100,40"
+             Minimum="0"
+             Maximum="1"
+             IsIndeterminate="False"
+             Background="Transparent"
+             Foreground="#FF1DB954"
+             BorderBrush="Transparent"
+             BorderThickness="0"
+             >
+            <ProgressBar.Resources>
+                <!-- Style for the background of the progress bar (track) -->
+                <Style TargetType="Border">
+                    <Setter Property="CornerRadius" Value="5"/>
+                    <Setter Property="Background" Value="Transparent"/>
+                    <!-- Darker background color for the track -->
+                </Style>
+            </ProgressBar.Resources>
+            <ProgressBar.Template>
+                <ControlTemplate TargetType="ProgressBar">
+                    <Border Background="#0000" BorderBrush="Transparent" BorderThickness="0" CornerRadius="5">
+                        <Grid>
+                            <!-- Background (track) -->
+                            <Border x:Name="PART_Track" Background="#0000" CornerRadius="5" />
+                            <!-- Foreground (moving progress) -->
+                            <Border x:Name="PART_Indicator" Background="{Binding Foreground, RelativeSource={RelativeSource TemplatedParent}}" CornerRadius="5"/>
+                        </Grid>
+                    </Border>
+                </ControlTemplate>
+            </ProgressBar.Template>
+        </ProgressBar>
+
     </Grid>
 </Window>
